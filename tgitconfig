@@ -1,0 +1,5 @@
+# System config for tgit
+[tgit "alias"]
+	clean = cleanup
+	show-ref = refbrowse
+	status = repostatus

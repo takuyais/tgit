@@ -1,0 +1,390 @@
+#!/bin/bash
+#
+# vi: ts=2 sts=2 sw=2 ft=bash
+#
+# Wrapper command to convert options from the git style to the TortoiseGitProc.exe style.
+# Ref.: https://tortoisegit.org/docs/tortoisegit/tgit-automation.html#tgit-automation-basics
+set -u
+
+readonly TGIT_SYSTEM_CONFIG="$(dirname "$(readlink -f "$0")")/tgitconfig"
+
+tgit::get_tortoisegitproc_path() {
+  local tortoisegitproc_path=$(git config tgit.tortoiseGitProcPath)
+  if [[ -z "${tortoisegitproc_path}" ]]; then
+    tortoisegitproc_path="tortoisegitproc"
+  fi
+
+  echo "${tortoisegitproc_path}"
+}
+
+tgit::normalize_rev() {
+  # Convert `@` to `HEAD` because TortoiseGit doesn't support an `@` sign that is a shortcut for `HEAD` in git.
+  local normalized_rev="${1/#@/HEAD}"
+  if [[ "${normalized_rev}" == "$1" ]]; then
+    echo "$1"
+    return
+  fi
+
+  local orig_sha1 norm_sha1
+  orig_sha1=$(git rev-parse $1) || exit 1
+  norm_sha1=$(git rev-parse ${normalized_rev}) || exit 1
+
+  if [[ "${orig_sha1}" == "${norm_sha1}" ]]; then
+    echo "${normalized_rev}"
+  else
+    echo "$1"
+  fi
+}
+
+#######################################
+# Globals:
+#   TGIT_COMMAND
+#   TGIT_OPTS
+#######################################
+tgit::parse_opts() {
+  # TortoiseGit GitHash.h: GIT_REV_ZERO 0000000000000000000000000000000000000000
+  local GIT_REV_ZERO=0000000000000000000000000000000000000000
+  readonly GIT_REV_ZERO
+
+  if (( $# > 0 )); then
+    # Expand alias
+    local alias_string
+    local expansion_stack=()
+    while true; do
+      expansion_stack+=("$1")
+      alias_string=$(git config tgit.alias."$1" || git config --file "${TGIT_SYSTEM_CONFIG}" tgit.alias."$1") || break
+      if [[ " ${expansion_stack[@]} " =~ " ${alias_string} " ]]; then
+        echo "alias loop detected: expansion of '${expansion_stack[0]}' does not terminate" >&2
+        exit 1
+      fi
+
+      shift
+      # If the alias expansion is prefixed with an exclamation point: `!`, treat as a shell command.
+      if [[ "${alias_string}" == "!"* ]]; then
+        eval ${alias_string:1} "$@"
+        exit
+      else
+        set -- ${alias_string} "$@"
+      fi
+    done
+  fi
+
+  TGIT_COMMAND=$1
+  shift
+
+  TGIT_OPTS=()
+  while true; do
+    case "${TGIT_COMMAND}" in
+      blame)
+        # TODO: double dash: tgit blame master -- future-apparel-common/src/main/java/jp/co/future/apparel/logics/com/Com21001Logic.java
+        if (( $# == 0 )); then
+          :
+        elif (( $# == 1 )); then
+          TGIT_OPTS+=(-path "$1")
+          shift
+        else
+          TGIT_OPTS+=(-endrev "$1" -path "$2")
+          shift 2
+        fi
+        ;;
+
+      diff)
+        if [[ "$1" == "--stat" ]]; then
+          # Case: `tgit diff --stat A..B`
+
+          shift
+          tgit::parse_opts showcompare "$@"
+          break
+        fi
+
+        # possible cases
+        # tgit diff 07d34e8e1:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql @:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql
+        # declare -a TGIT_REVS=([0]="07d34e8e1:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql" [1]="@:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql")
+        # declare -a TGIT_PATHS=()
+        #
+        # tgit diff 07d34e8e1:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql
+        # declare -a TGIT_REVS=([0]="07d34e8e1:future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql")
+        # declare -a TGIT_PATHS=()
+        #
+        #
+        # tgit diff 07d34e8e1..@ future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql
+        # declare -a TGIT_REVS=([0]="07d34e8e1..@")
+        # declare -a TGIT_PATHS=([0]="future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql")
+        #
+        # tgit diff 07d34e8e1 future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql
+        # declare -a TGIT_REVS=([0]="07d34e8e1")
+        # declare -a TGIT_PATHS=([0]="future-apparel-common/src/main/resources/sql/hib/hib20501_801_sel_t_haibun.sql")
+        # 07d34e8e1..working-tree
+
+        local TGIT_REVS TGIT_PATHS
+        tgit::parse_rev_path "$@"
+        # TODO: `tgit diff 07d34e8e1..@`
+        # declare -a TGIT_REVS=([0]="07d34e8e1..@")
+        # declare -a TGIT_PATHS=()
+        shift $#
+
+        #tgitproc -command diff -path future-apparel-web/src/main/resources/sql/sho/sho50405_903_sei_m_sina_g.sql -path2 future-apparel-common/src/main/resources/sql/sho/sho50405_903_sei_m_sina_g.sql -startrev f542296194463ea898e2e872069186c7287f81ea -endrev HEAD
+        # TODO: Other case
+        # TODO: git diff hoge..fuga -- foo.txt
+        # ex. git diff origin/master... -- future-apparel-common/src/main/java/jp/co/future/apparel/logics/biz/Biz20201Logic.java
+        if [[ "${TGIT_REVS[0]}" == *":"* ]]; then
+          # Case: `tgit diff <blob> <blob>`
+
+          local blob1=${TGIT_REVS[0]}
+          local blob2=${TGIT_REVS[1]:-${TGIT_PATHS[0]}}
+          local r1 r2
+          if [[ "${blob1}" == *":"* ]]; then
+            r1=$(tgit::normalize_rev "${blob1%:*}")
+          fi
+          local p1=${blob1#*:}
+          if [[ "${blob2}" == *":"* ]]; then
+            r2=$(tgit::normalize_rev "${blob2%:*}")
+          fi
+          local p2=${blob2#*:}
+          shift 2
+
+          if [[ -n "${r1:-}" || -n "${r2:-}" ]]; then
+            if [[ ! -v r1 ]]; then
+              r1=${GIT_REV_ZERO}
+            fi
+            if [[ ! -v r2 ]]; then
+              r2=${GIT_REV_ZERO}
+            fi
+          fi
+        else
+          # Case: `tgit diff <commit> [--] <path>`
+
+          # Resolve pathspec
+          # TODO: Handle no difference, it will result in empty.
+          readarray -t TGIT_PATHS < <(git diff --name-only ${TGIT_REVS[0]} -- "${TGIT_PATHS[@]}")
+
+          if (( ${#TGIT_PATHS[@]} > 1 )); then
+            tgit::parse_opts showcompare "${TGIT_REVS[@]}"
+            break
+          fi
+
+          tgit::resolve_rev_range ${TGIT_REVS[0]}
+          shift
+
+          local r1=${TGIT_REVS[0]}
+          local r2=${TGIT_REVS[1]}
+          local p1=${TGIT_PATHS[0]}
+        fi
+
+        # TODO: Handle bash process substitution
+        # [[ -p "${p1}" ]] && echo true
+        # pwd
+
+        TGIT_OPTS+=(-path "${p1}"  ${p2:+-path2 "${p2}"} ${r1:+-startrev "${r1}"} ${r2:+-endrev "${r2}"})
+        ;;
+
+      log)
+        # `tgit log` possible cases of revision parameters:
+        #   `tgit log`            -> -command log
+        #   `tgit log r1 r2`      -> -command log -endrev "r1 r2"
+        #   `tgit log r1 p1`      -> -command log -endrev r1 -path "p1"
+        #   `tgit log r1..r2 r3`  -> -command log -startrev r1 -endrev "r2 r3"
+        #   `tgit log r1...r2 r3` -> -command log -startrev $(git merge-base r1 r2) -endrev "r2 r3"
+        local TGIT_REVS TGIT_PATHS
+        tgit::parse_rev_path "$@"
+        shift $#
+
+        local rev
+        local endrevs=()
+        local startrevs=()
+        for rev in "${TGIT_REVS[@]}"; do
+          local raw_r1="${rev%%..*}"
+          local r1=$(tgit::normalize_rev "${raw_r1:-HEAD}")
+          local raw_r2="${rev##*..}"
+          local r2=$(tgit::normalize_rev "${raw_r2}")
+
+          # If the `endrevs` not contains the revision, Add it.
+          if [[ ! " ${endrevs[@]} " =~ " ${r2} " ]]; then
+            endrevs+=("${r2}")
+          fi
+
+          # If a single revision
+          if [[ "${rev}" == "${raw_r2}" ]]; then
+            continue
+          fi
+
+          if [[ "${rev}" == *"..."* ]]; then
+            r1=$(git merge-base "${r1}" "${r2}") || exit 1
+          fi
+
+          if [[ ! " ${startrevs[@]} " =~ " ${r1} " ]]; then
+            startrevs+=("${r1}")
+          fi
+        done
+        if (( ${#endrevs[@]} > 0 )); then
+          TGIT_OPTS+=(-endrev "${endrevs[*]}" -rev "${endrevs[0]}")
+        fi
+        if (( ${#startrevs[@]} > 0 )); then
+          TGIT_OPTS+=(-startrev "${startrevs[*]}")
+        fi
+
+        if (( ${#TGIT_PATHS[@]} > 0 )); then
+          TGIT_OPTS+=(-path "${TGIT_PATHS[0]}")
+        fi
+        ;;
+
+      repostatus)
+        if (( $# > 0 )); then
+          # TODO: parse pathspec
+          TGIT_OPTS+=(-path "$1")
+          shift
+        fi
+        ;;
+
+      show)
+        local TGIT_REVS TGIT_PATHS
+        tgit::parse_rev_path "${1:-HEAD}" --
+        shift
+        tgit::parse_opts showcompare ${TGIT_REVS[0]}^..${TGIT_REVS[0]}
+        break
+        ;;
+
+      showcompare)
+        local TGIT_REVS
+        tgit::resolve_rev_range ${1:-}
+        shift
+
+        TGIT_OPTS+=(-revision1 "${TGIT_REVS[0]}" -revision2 "${TGIT_REVS[1]}")
+        ;;
+
+      stash)
+        case "${1:-push}" in
+          apply)
+            shift
+            tgit::parse_opts stashapply "$@"
+            break
+            ;;
+          list)
+            shift
+            tgit::parse_opts reflog -ref refs/stash "$@"
+            break
+            ;;
+          pop)
+            shift
+            tgit::parse_opts stashpop "$@"
+            break
+            ;;
+          push)
+            shift
+            tgit::parse_opts stashsave "$@"
+            break
+            ;;
+        esac
+        ;;
+
+      *)
+        ;;
+    esac
+
+    TGIT_OPTS+=("$@")
+    break
+  done
+}
+
+#######################################
+# Globals:
+#   TGIT_REVS
+#   TGIT_PATHS
+#######################################
+tgit::parse_rev_path() {
+  local rev_opt
+  #rev_opt=$(git rev-parse --abbrev-ref --symbolic-full-name --revs-only --sq "$@") || exit 1
+  rev_opt=$(git rev-parse --symbolic --revs-only --sq "$@") || exit 1
+  TGIT_REVS=()
+  if [[ -n "${rev_opt}" ]]; then
+    while (( $# > 0 )); do
+      if [[ -z "$(git rev-parse -q --verify "$1")" ]]; then
+        break
+      fi
+
+      TGIT_REVS+=("$1")
+      shift
+    done
+  fi
+  #git rev-parse --abbrev-ref --symbolic-full-name --sq "$@" > /dev/null || echo 'Ambiguous argument error.'
+  #eval "local revs=(${rev_opt})"
+
+  #TGIT_REV_PATHS=$(git rev-parse --abbrev-ref --symbolic-full-name --no-revs --sq "$@") || echo 'Ambiguous argument error.'
+  local path_opt
+  #path_opt=$(git rev-parse --abbrev-ref --symbolic-full-name --no-revs --no-flags --sq "$@") || exit 1
+  path_opt=$(git rev-parse --symbolic --no-revs --no-flags --sq "$@") || exit 1
+  eval "TGIT_PATHS=(${path_opt})"
+
+  #TGIT_REV_RANGE=()
+  #if (( ${#revs[@]} > 1 )); then
+  #  #TGIT_REV_RANGE+=("${revs[$((${#revs[@]} - 1))]:1}")
+  #  TGIT_REV_RANGE+=("${revs[-1]/#^/}")
+  #fi
+  #if (( ${#revs[@]} > 0 )); then
+  #  TGIT_REV_RANGE+=("${revs[0]}")
+  #fi
+  [[ -n ${TGIT_TRACE:+trace_on} ]] && declare -p TGIT_REVS TGIT_PATHS
+}
+
+#######################################
+# Globals:
+#   TGIT_REVS
+#######################################
+tgit::resolve_rev_range() {
+  local revision_range=${1:-}
+  local raw_r1="${revision_range%%..*}"
+  local r1=$(tgit::normalize_rev "${raw_r1}")
+  local raw_r2="${revision_range##*..}"
+  local r2=$(tgit::normalize_rev "${raw_r2}")
+  shift
+
+  # `git diff` possible cases of revision parameters:
+  #   `git diff`        : No revision           -> HEAD..working-tree
+  #   `git diff A`      : Single revision       -> A..working-tree
+  #   `git diff A..`    : Range, start only     -> A..HEAD
+  #   `git diff ..A`    : Range, end only       -> HEAD..A
+  #   `git diff A..B`   : Range, both specified -> A..B
+  #   `git diff A...B`  : Three dots range      -> Equivalent to `git diff $(git merge-base A B) B`
+  #   `git diff ..`     : Dotdot only           -> Not a revision but a path
+
+  if [[ -z "${revision_range}" ]]; then
+    # Case: No revision
+    r1=HEAD
+    r2=${GIT_REV_ZERO}
+  elif [[ "${revision_range}" == "${raw_r1}" ]]; then
+    # Case: Single revision
+    r2=${GIT_REV_ZERO}
+  elif [[ -z "${r2}" ]]; then
+    # Case: Range, start only
+    r2=HEAD
+  elif [[ -z "${r1}" ]]; then
+    # Case: Range, end only
+    r1=HEAD
+  fi
+
+  if [[ "${revision_range}" == *"..."* ]]; then
+    # Case: Three dots range
+    r1=$(git merge-base "${r1}" "${r2}") || exit 1
+  fi
+
+  TGIT_REVS=("${r1}" "${r2}")
+}
+
+tgit::main() {
+  #local TGIT_TRACE=1
+  [[ -n ${TGIT_TRACE:+trace_on} ]] && set -x && trap 'set +x' EXIT ERR
+
+  local tortoisegitproc_path=$(tgit::get_tortoisegitproc_path)
+
+  # Shadow these variables if already defined.
+  local TGIT_CD TGIT_COMMAND TGIT_OPTS
+  tgit::parse_opts "$@"
+  [[ -n ${TGIT_TRACE:+trace_on} ]] && declare -p TGIT_OPTS
+  (
+    #cd "$(git rev-parse --show-toplevel)"
+    "${tortoisegitproc_path}" -command ${TGIT_COMMAND} "${TGIT_OPTS[@]}" & disown
+    #echo "${tortoisegitproc_path}" -command ${TGIT_COMMAND} "${TGIT_OPTS[@]}"
+  )
+}
+
+tgit::main "$@"
