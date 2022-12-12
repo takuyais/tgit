@@ -18,6 +18,11 @@ tgit::get_tortoisegitproc_path() {
 }
 
 tgit::normalize_rev() {
+  if [[ -z "$1" ]]; then
+    echo "HEAD"
+    return
+  fi
+
   # Convert `@` to `HEAD` because TortoiseGit doesn't support an `@` sign that is a shortcut for `HEAD` in git.
   local normalized_rev="${1/#@/HEAD}"
   if [[ "${normalized_rev}" == "$1" ]]; then
